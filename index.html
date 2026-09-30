@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f7f9fc" />
+  <title>WAY●MARK — Explore your way</title>
+
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link rel="preconnect" href="https://threejs.org" />
+
+  <link rel="stylesheet" href="./style.css" />
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+
+<body>
+  <main id="app">
+    <canvas id="globe-canvas" aria-label="Интерактивный глобус Waymark"></canvas>
+    <div id="city-labels" aria-hidden="true"></div>
+
+    <div class="ui-layer">
+      <header class="topbar glass-panel">
+        <button class="brand-button" id="brandButton" type="button" aria-label="Вернуться к карте">
+          <span class="brand-way">WAY</span><span class="brand-mark">●</span><span class="brand-mark-word">MARK</span>
+        </button>
+
+        <nav class="main-nav" aria-label="Основная навигация">
+          <button class="nav-button active" data-view="map" type="button">Карта</button>
+          <button class="nav-button" data-view="trips" type="button">Моё путешествие</button>
+          <button class="nav-button" id="surprise-button" type="button">Удиви меня</button>
+        </nav>
+
+        <div class="search-wrap">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"></circle>
+            <path d="M16 16L21 21"></path>
+          </svg>
+          <input
+            id="city-search"
+            type="search"
+            autocomplete="off"
+            placeholder="Поиск города"
+            aria-label="Поиск города"
+          />
+          <div id="search-results" class="search-results glass-panel hidden"></div>
+        </div>
+      </header>
+
+      <aside id="city-card" class="city-card glass-panel hidden" aria-live="polite"></aside>
+
+
+      <section id="transport-panel" class="transport-panel glass-panel hidden" aria-label="Выбор транспорта">
+        <div class="transport-header">
+          <div>
+            <div class="transport-kicker">Маршрут</div>
+            <div id="transport-route-title" class="transport-route-title">— → —</div>
+          </div>
+          <div id="transport-distance" class="transport-distance"></div>
+        </div>
+        <div id="transport-options" class="transport-options"></div>
+      </section>
+
+      <section id="bottom-panel" class="bottom-panel glass-panel" aria-live="polite">
+        <div id="bottom-panel-content" class="bottom-panel-content">
+          <span class="bottom-panel-icon">📍</span>
+          <span id="bottom-panel-text">Выберите место отправления</span>
+        </div>
+      </section>
+
+      <div id="modal-backdrop" class="modal-backdrop hidden">
+        <section id="app-modal" class="app-modal glass-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div class="modal-header">
+            <div class="modal-header-main">
+              <button id="modal-back" class="modal-back-button hidden" type="button" aria-label="Назад к путешествию">←</button>
+              <div>
+                <div class="eyebrow" id="modal-eyebrow">WAY●MARK</div>
+                <h2 id="modal-title">Подробности</h2>
+              </div>
+            </div>
+            <button id="modal-close" class="icon-button" type="button" aria-label="Закрыть">×</button>
+          </div>
+          <div id="modal-content" class="modal-content"></div>
+        </section>
+      </div>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+      <div class="edge-hint edge-hint-left">‹</div>
+      <div class="edge-hint edge-hint-right">›</div>
+
+      
+    </div>
+  </main>
+
+  <script type="module" src="./script.js"></script>
+</body>
+</html>
