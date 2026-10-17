@@ -2,13 +2,33 @@ import * as THREE from "three";
 import { CITY_DATA } from "./city-data.js";
 import { makePairKey, TRANSPORT_CONNECTIONS, TRANSPORT_DEFINITIONS } from "./transport-data.js";
 
+// Startup overlay: wait for the first rendered frame and texture loading,
+// with a short fallback so a slow texture host cannot trap the user on it.
+const startupLoader = document.getElementById("startup-loader");
+let startupFirstFrameReady = false;
+let startupAssetsReady = false;
+let startupHideScheduled = false;
+function finishStartupLoaderIfReady() {
+  if (!startupLoader || !startupFirstFrameReady || !startupAssetsReady || startupHideScheduled) return;
+  startupHideScheduled = true;
+  window.setTimeout(() => {
+    startupLoader.classList.add("is-hidden");
+    startupLoader.setAttribute("aria-hidden", "true");
+    window.setTimeout(() => startupLoader.remove(), 500);
+  }, 220);
+}
+const startupAssetFallbackTimer = window.setTimeout(() => {
+  startupAssetsReady = true;
+  finishStartupLoaderIfReady();
+}, 4500);
+
 /* ============================================================
-   WAY●MARK — Prototype 1.0
-   Main screen foundation:
+   WAY●MARK — Prototype 1.25
+   Mobile foundation + startup screen:
    - Full-screen 3D globe
    - 215 cities
    - Surprise route generator
-   - Mouse drag / wheel interaction
+   - Mouse/touch drag, wheel and pinch interaction
    - Edge-hover automatic rotation
    - Search
    - City selection
@@ -156,6 +176,19 @@ const modalClose = document.getElementById("modal-close");
 const modalBack = document.getElementById("modal-back");
 const navButtons = [...document.querySelectorAll(".nav-button")];
 const surpriseButton = document.getElementById("surprise-button");
+const mobileMenuToggle = document.getElementById("mobile-menu-toggle");
+
+function setMobileMenuOpen(open) {
+  const topbar = mobileMenuToggle?.closest(".topbar");
+  if (!topbar || !mobileMenuToggle) return;
+  topbar.classList.toggle("mobile-menu-open", open);
+  mobileMenuToggle.setAttribute("aria-expanded", String(open));
+  mobileMenuToggle.setAttribute("aria-label", open ? "Закрыть меню" : "Открыть меню");
+}
+
+mobileMenuToggle?.addEventListener("click", () => {
+  setMobileMenuOpen(mobileMenuToggle.getAttribute("aria-expanded") !== "true");
+});
 const edgeHintLeft = document.querySelector(".edge-hint-left");
 const edgeHintRight = document.querySelector(".edge-hint-right");
 
@@ -363,6 +396,12 @@ Promise.all([
     cloudMaterial.opacity = 0.075;
     cloudMaterial.needsUpdate = true;
   }
+}).catch((error) => {
+  console.warn("WAY●MARK: texture loading had a problem; continuing with fallback materials.", error);
+}).finally(() => {
+  startupAssetsReady = true;
+  window.clearTimeout(startupAssetFallbackTimer);
+  finishStartupLoaderIfReady();
 });
 
 function setPerformanceMode(active) {
@@ -2536,6 +2575,14 @@ function showSearchResults(query) {
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const activeTouchPointers = new Map();
+let pinchZoomStart = null;
+
+function getActiveTouchDistance() {
+  const points = [...activeTouchPointers.values()].slice(0, 2);
+  if (points.length < 2) return 0;
+  return Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+}
 
 function isOverUiElement(target) {
   return Boolean(target?.closest?.(".topbar, .bottom-panel, .city-card, .transport-panel, .modal-backdrop, .search-results"));
@@ -2544,6 +2591,22 @@ function isOverUiElement(target) {
 function handlePointerMove(event) {
   state.pointerX = event.clientX;
   state.pointerY = event.clientY;
+
+  if (event.pointerType === "touch" && activeTouchPointers.has(event.pointerId)) {
+    activeTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pinchZoomStart && activeTouchPointers.size >= 2) {
+      const currentDistance = getActiveTouchDistance();
+      if (currentDistance > 0 && pinchZoomStart.distance > 0) {
+        const zoomedZ = pinchZoomStart.cameraZ * (pinchZoomStart.distance / currentDistance);
+        camera.position.z = THREE.MathUtils.clamp(zoomedZ, 3.25, 6.55);
+        state.labelsDirty = true;
+        state.sceneDirty = true;
+        if (!cityCard.classList.contains("hidden")) hideCityCard();
+      }
+      return;
+    }
+  }
 
   const target = document.elementFromPoint(event.clientX, event.clientY);
   state.pointerOverUI = isOverUiElement(target);
@@ -2580,6 +2643,27 @@ function handlePointerMove(event) {
 function handleCanvasPointerDown(event) {
   if (state.activeModal) return;
 
+  if (event.pointerType === "touch") {
+    activeTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (activeTouchPointers.size >= 2) {
+      if (activeTouchPointers.size === 2) {
+        pinchZoomStart = {
+          distance: Math.max(1, getActiveTouchDistance()),
+          cameraZ: camera.position.z
+        };
+      }
+      state.isDragging = false;
+      state.dragMoved = true;
+      state.globeVelocityY = 0;
+      state.globeVelocityX = 0;
+      if (!cityCard.classList.contains("hidden")) hideCityCard();
+      clearTimeout(state.qualityRestoreTimer);
+      setPerformanceMode(true);
+      canvas.setPointerCapture?.(event.pointerId);
+      return;
+    }
+  }
+
   // Moving the globe hides only the floating card.
   // The selected city itself remains selected.
   if (!cityCard.classList.contains("hidden")) {
@@ -2597,6 +2681,20 @@ function handleCanvasPointerDown(event) {
 }
 
 function handleCanvasPointerUp(event) {
+  if (event.pointerType === "touch") {
+    activeTouchPointers.delete(event.pointerId);
+    if (pinchZoomStart) {
+      if (activeTouchPointers.size < 2) {
+        pinchZoomStart = null;
+        state.isDragging = false;
+        canvas.releasePointerCapture?.(event.pointerId);
+        clearTimeout(state.qualityRestoreTimer);
+        state.qualityRestoreTimer = setTimeout(() => setPerformanceMode(false), 180);
+      }
+      return;
+    }
+  }
+
   if (!state.isDragging) return;
 
   state.isDragging = false;
@@ -2702,10 +2800,12 @@ function resize() {
   state.labelsDirty = true;
 }
 
-document.addEventListener("mousemove", handlePointerMove);
+document.addEventListener("pointermove", handlePointerMove);
 canvas.addEventListener("pointerdown", handleCanvasPointerDown);
 canvas.addEventListener("pointerup", handleCanvasPointerUp);
-canvas.addEventListener("pointercancel", () => {
+canvas.addEventListener("pointercancel", (event) => {
+  activeTouchPointers.delete(event.pointerId);
+  pinchZoomStart = null;
   state.isDragging = false;
   state.globeVelocityY = 0;
   state.globeVelocityX = 0;
@@ -2753,10 +2853,15 @@ document.addEventListener("pointerdown", (event) => {
   ) {
     searchResults.classList.add("hidden");
   }
+
+  if (!event.target.closest(".topbar")) {
+    setMobileMenuOpen(false);
+  }
 });
 
 navButtons.forEach((button) => {
   button.addEventListener("click", () => {
+    setMobileMenuOpen(false);
     const view = button.dataset.view;
 
     navButtons.forEach((item) => item.classList.toggle("active", item === button));
@@ -2773,6 +2878,7 @@ navButtons.forEach((button) => {
 surpriseButton?.addEventListener("click", openSurpriseModal);
 
 document.getElementById("brandButton").addEventListener("click", () => {
+  setMobileMenuOpen(false);
   closeModal();
 
   state.selectedOrigin = null;
@@ -2810,9 +2916,9 @@ modalBackdrop.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.activeModal) {
-    closeModal();
-  }
+  if (event.key !== "Escape") return;
+  if (state.activeModal) closeModal();
+  setMobileMenuOpen(false);
 });
 
 let lastFrame = performance.now();
@@ -2903,6 +3009,11 @@ function animate(now) {
     renderer.render(scene, camera);
     state.lastRenderedAt = now;
     state.sceneDirty = false;
+
+    if (!startupFirstFrameReady) {
+      startupFirstFrameReady = true;
+      finishStartupLoaderIfReady();
+    }
   }
 }
 
