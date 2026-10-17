@@ -23,7 +23,7 @@ const startupAssetFallbackTimer = window.setTimeout(() => {
 }, 4500);
 
 /* ============================================================
-   WAY●MARK — Prototype 1.28
+   WAY●MARK — Prototype 1.29
    Mobile foundation + startup screen:
    - Full-screen 3D globe
    - 215 cities
@@ -121,6 +121,9 @@ const state = {
   isDragging: false,
   dragMoved: false,
   lastPointerX: 0,
+  lastPointerTime: 0,
+  mobileSwipeVelocityY: 0,
+  mobileSwipeVelocityX: 0,
   globeVelocityY: 0,
   globeVelocityX: 0,
   labelsDirty: true,
@@ -239,7 +242,14 @@ const MIN_PITCH = THREE.MathUtils.degToRad(-66);
 const MAX_PITCH = THREE.MathUtils.degToRad(66);
 const isMobileUiActive = () => document.documentElement.dataset.device === "mobile";
 const getMaxZoomOut = () => isMobileUiActive() ? 8.5 : 7.6;
-const mobileTouchSwipeBoost = 1.54; // About 10% faster than the previous mobile setting.
+// Mobile touch rotation is mapped directly from CSS-pixel movement to angle.
+// A 300px horizontal swipe rotates the globe about 86 degrees; a quick release
+// adds only a modest, capped glide. These constants are mobile-touch only.
+const MOBILE_TOUCH_RADIANS_PER_PIXEL = 0.005;
+const MOBILE_TOUCH_PITCH_RADIANS_PER_PIXEL = 0.0042;
+const MOBILE_TOUCH_MAX_YAW_SPEED = 4.2; // radians/second before release damping
+const MOBILE_TOUCH_MAX_PITCH_SPEED = 2.4;
+const MOBILE_TOUCH_RELEASE_INERTIA = 0.62;
 
 const ambientLight = new THREE.HemisphereLight(0xeaf4ff, 0x647180, 1.85);
 scene.add(ambientLight);
@@ -2740,11 +2750,48 @@ function handlePointerMove(event) {
     const dx = event.clientX - state.lastPointerX;
     const dy = event.clientY - (state.lastPointerY ?? event.clientY);
 
-    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+    if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
       state.dragMoved = true;
-      const touchSwipeBoost = isMobileUiActive() && event.pointerType === "touch" ? mobileTouchSwipeBoost : 1;
-      state.globeVelocityY = dx * dragSensitivity * 6 * touchSwipeBoost;
-      state.globeVelocityX = dy * dragPitchSensitivity * 6 * touchSwipeBoost;
+
+      if (isMobileUiActive() && event.pointerType === "touch") {
+        // Apply the angle change directly from the distance travelled. The old
+        // touch path treated pixels-per-event as angular velocity and multiplied
+        // by frame delta again, making rotation too slow and frame-rate dependent.
+        const now = performance.now();
+        const elapsed = Math.max((now - (state.lastPointerTime || (now - 16))) / 1000, 1 / 240);
+        const yawDelta = dx * MOBILE_TOUCH_RADIANS_PER_PIXEL;
+        const previousPitch = globeGroup.rotation.x;
+        globeGroup.rotation.y += yawDelta;
+        globeGroup.rotation.x = THREE.MathUtils.clamp(
+          previousPitch + dy * MOBILE_TOUCH_PITCH_RADIANS_PER_PIXEL,
+          MIN_PITCH,
+          MAX_PITCH
+        );
+        const actualPitchDelta = globeGroup.rotation.x - previousPitch;
+
+        // Keep a capped release velocity for a small, predictable glide.
+        const instantYawVelocity = THREE.MathUtils.clamp(
+          yawDelta / elapsed,
+          -MOBILE_TOUCH_MAX_YAW_SPEED,
+          MOBILE_TOUCH_MAX_YAW_SPEED
+        );
+        const instantPitchVelocity = THREE.MathUtils.clamp(
+          actualPitchDelta / elapsed,
+          -MOBILE_TOUCH_MAX_PITCH_SPEED,
+          MOBILE_TOUCH_MAX_PITCH_SPEED
+        );
+        state.mobileSwipeVelocityY = instantYawVelocity;
+        state.mobileSwipeVelocityX = instantPitchVelocity;
+        state.globeVelocityY = 0;
+        state.globeVelocityX = 0;
+        state.sceneDirty = true;
+        state.labelsDirty = true;
+        state.lastPointerTime = now;
+      } else {
+        // Preserve the existing desktop mouse/touch interaction exactly.
+        state.globeVelocityY = dx * dragSensitivity * 6;
+        state.globeVelocityX = dy * dragPitchSensitivity * 6;
+      }
 
       if (!cityCard.classList.contains("hidden")) {
         hideCityCard();
@@ -2753,6 +2800,9 @@ function handlePointerMove(event) {
 
     state.lastPointerX = event.clientX;
     state.lastPointerY = event.clientY;
+    if (!(isMobileUiActive() && event.pointerType === "touch")) {
+      state.lastPointerTime = performance.now();
+    }
     state.labelsDirty = true;
   }
 
@@ -2811,6 +2861,9 @@ function handleCanvasPointerDown(event) {
   state.lastPointerX = event.clientX;
   setPerformanceMode(true);
   state.lastPointerY = event.clientY;
+  state.lastPointerTime = performance.now();
+  state.mobileSwipeVelocityY = 0;
+  state.mobileSwipeVelocityX = 0;
   state.globeVelocityY = 0;
   state.globeVelocityX = 0;
   canvas.setPointerCapture?.(event.pointerId);
@@ -2832,6 +2885,17 @@ function handleCanvasPointerUp(event) {
   }
 
   if (!state.isDragging) return;
+
+  if (isMobileUiActive() && event.pointerType === "touch") {
+    const idleSinceLastMove = performance.now() - state.lastPointerTime;
+    if (state.dragMoved && idleSinceLastMove < 100) {
+      state.globeVelocityY = state.mobileSwipeVelocityY * MOBILE_TOUCH_RELEASE_INERTIA;
+      state.globeVelocityX = state.mobileSwipeVelocityX * MOBILE_TOUCH_RELEASE_INERTIA;
+    } else {
+      state.globeVelocityY = 0;
+      state.globeVelocityX = 0;
+    }
+  }
 
   state.isDragging = false;
   canvas.releasePointerCapture?.(event.pointerId);
@@ -2864,6 +2928,13 @@ function updateEdgeRotation(delta) {
   if (isMobileUiActive() && state.isFocusingCity) return;
 
   const mobileUi = isMobileUiActive();
+  // Direct mobile touch dragging already applies the globe rotation per pixel;
+  // do not integrate inertia again until the finger is released.
+  if (mobileUi && state.isDragging) {
+    state.globeVelocityY = 0;
+    state.globeVelocityX = 0;
+    return;
+  }
   const x = state.pointerX / window.innerWidth;
   const left = !mobileUi && state.pointerX < window.innerWidth * 0.14 && !state.pointerOverUI;
   const right = !mobileUi && state.pointerX > window.innerWidth * 0.86 && !state.pointerOverUI;
