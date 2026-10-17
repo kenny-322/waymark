@@ -247,9 +247,25 @@ const getMaxZoomOut = () => isMobileUiActive() ? 8.5 : 7.6;
 // adds only a modest, capped glide. These constants are mobile-touch only.
 const MOBILE_TOUCH_RADIANS_PER_PIXEL = 0.005;
 const MOBILE_TOUCH_PITCH_RADIANS_PER_PIXEL = 0.0042;
+const MOBILE_TOUCH_MIN_ZOOM_SENSITIVITY = 0.55;
 const MOBILE_TOUCH_MAX_YAW_SPEED = 4.2; // radians/second before release damping
 const MOBILE_TOUCH_MAX_PITCH_SPEED = 2.4;
 const MOBILE_TOUCH_RELEASE_INERTIA = 0.62;
+
+// On mobile, reduce globe rotation gradually as the camera zooms in so that
+// close-up browsing remains precise. Keep the existing fast feel when zoomed out.
+function getMobileSwipeZoomSensitivity() {
+  const minZoom = 3.25;
+  const maxZoom = getMaxZoomOut();
+  const zoomProgress = THREE.MathUtils.clamp(
+    (camera.position.z - minZoom) / (maxZoom - minZoom),
+    0,
+    1
+  );
+  // Smoothstep avoids sudden jumps in sensitivity between zoom levels.
+  const easedProgress = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
+  return THREE.MathUtils.lerp(MOBILE_TOUCH_MIN_ZOOM_SENSITIVITY, 1, easedProgress);
+}
 
 const ambientLight = new THREE.HemisphereLight(0xeaf4ff, 0x647180, 1.85);
 scene.add(ambientLight);
@@ -2759,11 +2775,13 @@ function handlePointerMove(event) {
         // by frame delta again, making rotation too slow and frame-rate dependent.
         const now = performance.now();
         const elapsed = Math.max((now - (state.lastPointerTime || (now - 16))) / 1000, 1 / 240);
-        const yawDelta = dx * MOBILE_TOUCH_RADIANS_PER_PIXEL;
+        const zoomSensitivity = getMobileSwipeZoomSensitivity();
+        const yawDelta = dx * MOBILE_TOUCH_RADIANS_PER_PIXEL * zoomSensitivity;
+        const pitchDelta = dy * MOBILE_TOUCH_PITCH_RADIANS_PER_PIXEL * zoomSensitivity;
         const previousPitch = globeGroup.rotation.x;
         globeGroup.rotation.y += yawDelta;
         globeGroup.rotation.x = THREE.MathUtils.clamp(
-          previousPitch + dy * MOBILE_TOUCH_PITCH_RADIANS_PER_PIXEL,
+          previousPitch + pitchDelta,
           MIN_PITCH,
           MAX_PITCH
         );
