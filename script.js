@@ -2506,6 +2506,51 @@ function showToast(message) {
   }, 2200);
 }
 
+// Smoothly bring a searched city to the front of the globe at a comfortable mid zoom.
+let cityFocusFrame = 0;
+function focusCityOnGlobe(city) {
+  if (!city) return;
+
+  if (cityFocusFrame) cancelAnimationFrame(cityFocusFrame);
+
+  const startQuaternion = globeGroup.quaternion.clone();
+  const localDirection = cityToVector3(city, 1).normalize();
+  const worldDirection = localDirection.clone().applyQuaternion(startQuaternion).normalize();
+  const facingDirection = new THREE.Vector3(0, 0, 1);
+  const alignment = new THREE.Quaternion().setFromUnitVectors(worldDirection, facingDirection);
+  const targetQuaternion = alignment.multiply(startQuaternion.clone()).normalize();
+
+  const startZoom = camera.position.z;
+  const targetZoom = 4.85;
+  const startedAt = performance.now();
+  const duration = 680;
+
+  state.globeVelocityY = 0;
+  state.globeVelocityX = 0;
+  clearTimeout(state.qualityRestoreTimer);
+  setPerformanceMode(true);
+
+  const animateFocus = (now) => {
+    const progress = THREE.MathUtils.clamp((now - startedAt) / duration, 0, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+
+    globeGroup.quaternion.slerpQuaternions(startQuaternion, targetQuaternion, eased);
+    camera.position.z = startZoom + (targetZoom - startZoom) * eased;
+    state.labelsDirty = true;
+    state.sceneDirty = true;
+
+    if (progress < 1) {
+      cityFocusFrame = requestAnimationFrame(animateFocus);
+    } else {
+      cityFocusFrame = 0;
+      clearTimeout(state.qualityRestoreTimer);
+      state.qualityRestoreTimer = setTimeout(() => setPerformanceMode(false), 180);
+    }
+  };
+
+  cityFocusFrame = requestAnimationFrame(animateFocus);
+}
+
 function showSearchResults(query) {
   const normalized = query.trim().toLowerCase();
 
@@ -2559,11 +2604,8 @@ function showSearchResults(query) {
       const city = findCity(button.dataset.cityId);
       if (!city) return;
 
-      if (isSameCity(city)) {
-        selectCity(city);
-      } else {
-        selectCity(city);
-      }
+      focusCityOnGlobe(city);
+      selectCity(city);
 
       searchInput.value = "";
       searchResults.classList.add("hidden");
@@ -2599,7 +2641,7 @@ function handlePointerMove(event) {
       const currentDistance = getActiveTouchDistance();
       if (currentDistance > 0 && pinchZoomStart.distance > 0) {
         const zoomedZ = pinchZoomStart.cameraZ * (pinchZoomStart.distance / currentDistance);
-        camera.position.z = THREE.MathUtils.clamp(zoomedZ, 3.25, 6.55);
+        camera.position.z = THREE.MathUtils.clamp(zoomedZ, 3.25, 7.6);
         state.labelsDirty = true;
         state.sceneDirty = true;
         if (!cityCard.classList.contains("hidden")) hideCityCard();
@@ -2617,8 +2659,9 @@ function handlePointerMove(event) {
 
     if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
       state.dragMoved = true;
-      state.globeVelocityY = dx * dragSensitivity * 6;
-      state.globeVelocityX = dy * dragPitchSensitivity * 6;
+      const touchSwipeBoost = event.pointerType === "touch" ? 1.22 : 1;
+      state.globeVelocityY = dx * dragSensitivity * 6 * touchSwipeBoost;
+      state.globeVelocityX = dy * dragPitchSensitivity * 6 * touchSwipeBoost;
 
       if (!cityCard.classList.contains("hidden")) {
         hideCityCard();
@@ -2824,7 +2867,7 @@ canvas.addEventListener("wheel", (event) => {
   camera.position.z = THREE.MathUtils.clamp(
     camera.position.z + zoomDelta,
     3.25,
-    6.55
+    7.6
   );
   if (camera.position.z !== previousZ) {
     state.labelsDirty = true;
