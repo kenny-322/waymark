@@ -23,7 +23,7 @@ const startupAssetFallbackTimer = window.setTimeout(() => {
 }, 4500);
 
 /* ============================================================
-   WAY●MARK — Prototype 1.25
+   WAY●MARK — Prototype 1.27
    Mobile foundation + startup screen:
    - Full-screen 3D globe
    - 215 cities
@@ -117,6 +117,7 @@ const state = {
   pointerY: window.innerHeight / 2,
   pointerOverUI: false,
   activeModal: null,
+  isFocusingCity: false,
   isDragging: false,
   dragMoved: false,
   lastPointerX: 0,
@@ -236,6 +237,7 @@ const edgeRotationMaxSpeed = 0.34;
 const globeDamping = 7.5;
 const MIN_PITCH = THREE.MathUtils.degToRad(-66);
 const MAX_PITCH = THREE.MathUtils.degToRad(66);
+const isMobileUiActive = () => document.documentElement.dataset.device === "mobile";
 
 const ambientLight = new THREE.HemisphereLight(0xeaf4ff, 0x647180, 1.85);
 scene.add(ambientLight);
@@ -2551,6 +2553,68 @@ function focusCityOnGlobe(city) {
   cityFocusFrame = requestAnimationFrame(animateFocus);
 }
 
+// Mobile-only search focus. The normal render loop updates Euler rotations every
+// frame, which can overwrite a quaternion animation. While this focused animation
+// runs, mobile rotation updates are suspended so the selected city reliably reaches
+// the center-facing side of the globe.
+function focusCityOnGlobeMobile(city) {
+  if (!city) return;
+
+  if (cityFocusFrame) cancelAnimationFrame(cityFocusFrame);
+
+  const startQuaternion = globeGroup.quaternion.clone();
+  const localDirection = cityToVector3(city, 1).normalize();
+  const worldDirection = localDirection.clone().applyQuaternion(startQuaternion).normalize();
+  // Match the point where the camera's center ray intersects the globe surface.
+  // The camera sits slightly above the equator, so this gives a more accurate
+  // screen-center alignment than aiming at the globe's exact +Z axis.
+  const viewCenterY = THREE.MathUtils.clamp(camera.position.y / GLOBE_RADIUS, -0.95, 0.95);
+  const cameraDirection = new THREE.Vector3(
+    0,
+    viewCenterY,
+    Math.sqrt(1 - viewCenterY * viewCenterY)
+  );
+  const alignment = new THREE.Quaternion().setFromUnitVectors(worldDirection, cameraDirection);
+  const targetQuaternion = alignment.multiply(startQuaternion.clone()).normalize();
+
+  const startZoom = camera.position.z;
+  const targetZoom = 4.85;
+  const startedAt = performance.now();
+  const duration = 760;
+
+  state.isFocusingCity = true;
+  state.globeVelocityY = 0;
+  state.globeVelocityX = 0;
+  clearTimeout(state.qualityRestoreTimer);
+  setPerformanceMode(true);
+
+  const animateFocus = (now) => {
+    const progress = THREE.MathUtils.clamp((now - startedAt) / duration, 0, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+
+    globeGroup.quaternion.slerpQuaternions(startQuaternion, targetQuaternion, eased);
+    camera.position.z = startZoom + (targetZoom - startZoom) * eased;
+    state.labelsDirty = true;
+    state.sceneDirty = true;
+
+    if (progress < 1) {
+      cityFocusFrame = requestAnimationFrame(animateFocus);
+    } else {
+      globeGroup.quaternion.copy(targetQuaternion);
+      state.isFocusingCity = false;
+      state.globeVelocityY = 0;
+      state.globeVelocityX = 0;
+      state.labelsDirty = true;
+      state.sceneDirty = true;
+      cityFocusFrame = 0;
+      clearTimeout(state.qualityRestoreTimer);
+      state.qualityRestoreTimer = setTimeout(() => setPerformanceMode(false), 180);
+    }
+  };
+
+  cityFocusFrame = requestAnimationFrame(animateFocus);
+}
+
 function showSearchResults(query) {
   const normalized = query.trim().toLowerCase();
 
@@ -2604,7 +2668,8 @@ function showSearchResults(query) {
       const city = findCity(button.dataset.cityId);
       if (!city) return;
 
-      focusCityOnGlobe(city);
+      if (isMobileUiActive()) focusCityOnGlobeMobile(city);
+      else focusCityOnGlobe(city);
       selectCity(city);
 
       searchInput.value = "";
@@ -2659,7 +2724,7 @@ function handlePointerMove(event) {
 
     if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
       state.dragMoved = true;
-      const touchSwipeBoost = event.pointerType === "touch" ? 1.22 : 1;
+      const touchSwipeBoost = isMobileUiActive() && event.pointerType === "touch" ? 1.403 : 1;
       state.globeVelocityY = dx * dragSensitivity * 6 * touchSwipeBoost;
       state.globeVelocityX = dy * dragPitchSensitivity * 6 * touchSwipeBoost;
 
@@ -2675,7 +2740,7 @@ function handlePointerMove(event) {
 
   const leftEdge = event.clientX < window.innerWidth * 0.14;
   const rightEdge = event.clientX > window.innerWidth * 0.86;
-  const canAutoRotate = !state.pointerOverUI && !state.activeModal && !state.isDragging;
+  const canAutoRotate = !isMobileUiActive() && !state.pointerOverUI && !state.activeModal && !state.isDragging;
 
   edgeHintLeft.classList.toggle("active", canAutoRotate && leftEdge);
   edgeHintRight.classList.toggle("active", canAutoRotate && rightEdge);
@@ -2767,13 +2832,17 @@ function handleCanvasPointerUp(event) {
 }
 
 function updateEdgeRotation(delta) {
+  // Do not touch Euler rotation while a mobile search-focus quaternion is animating.
+  if (isMobileUiActive() && state.isFocusingCity) return;
+
+  const mobileUi = isMobileUiActive();
   const x = state.pointerX / window.innerWidth;
-  const left = state.pointerX < window.innerWidth * 0.14 && !state.pointerOverUI;
-  const right = state.pointerX > window.innerWidth * 0.86 && !state.pointerOverUI;
+  const left = !mobileUi && state.pointerX < window.innerWidth * 0.14 && !state.pointerOverUI;
+  const right = !mobileUi && state.pointerX > window.innerWidth * 0.86 && !state.pointerOverUI;
 
   let targetVelocityY = 0;
 
-  if (!state.activeModal && !state.isDragging) {
+  if (!state.activeModal && !state.isDragging && !mobileUi) {
     if (left) {
       if (!cityCard.classList.contains("hidden")) {
         hideCityCard();
@@ -2806,11 +2875,13 @@ function updateEdgeRotation(delta) {
 
   globeGroup.rotation.y += state.globeVelocityY * delta;
   globeGroup.rotation.x += state.globeVelocityX * delta;
-  globeGroup.rotation.x = THREE.MathUtils.clamp(
-    globeGroup.rotation.x,
-    MIN_PITCH,
-    MAX_PITCH
-  );
+  if (!mobileUi) {
+    globeGroup.rotation.x = THREE.MathUtils.clamp(
+      globeGroup.rotation.x,
+      MIN_PITCH,
+      MAX_PITCH
+    );
+  }
 
   const moving = Math.abs(globeGroup.rotation.y - beforeY) > 0.00001 ||
     Math.abs(globeGroup.rotation.x - beforeX) > 0.00001;
@@ -2974,11 +3045,13 @@ function animate(now) {
   lastFrame = now;
 
   updateEdgeRotation(delta);
-  globeGroup.rotation.x = THREE.MathUtils.clamp(
-    globeGroup.rotation.x,
-    MIN_PITCH,
-    MAX_PITCH
-  );
+  if (!isMobileUiActive()) {
+    globeGroup.rotation.x = THREE.MathUtils.clamp(
+      globeGroup.rotation.x,
+      MIN_PITCH,
+      MAX_PITCH
+    );
+  }
 
   clouds.rotation.y += delta * 0.0018;
 
