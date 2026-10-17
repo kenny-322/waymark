@@ -23,7 +23,7 @@ const startupAssetFallbackTimer = window.setTimeout(() => {
 }, 4500);
 
 /* ============================================================
-   WAY●MARK — Prototype 1.27
+   WAY●MARK — Prototype 1.28
    Mobile foundation + startup screen:
    - Full-screen 3D globe
    - 215 cities
@@ -238,6 +238,8 @@ const globeDamping = 7.5;
 const MIN_PITCH = THREE.MathUtils.degToRad(-66);
 const MAX_PITCH = THREE.MathUtils.degToRad(66);
 const isMobileUiActive = () => document.documentElement.dataset.device === "mobile";
+const getMaxZoomOut = () => isMobileUiActive() ? 8.5 : 7.6;
+const mobileTouchSwipeBoost = 1.54; // About 10% faster than the previous mobile setting.
 
 const ambientLight = new THREE.HemisphereLight(0xeaf4ff, 0x647180, 1.85);
 scene.add(ambientLight);
@@ -2553,35 +2555,47 @@ function focusCityOnGlobe(city) {
   cityFocusFrame = requestAnimationFrame(animateFocus);
 }
 
-// Mobile-only search focus. The normal render loop updates Euler rotations every
-// frame, which can overwrite a quaternion animation. While this focused animation
-// runs, mobile rotation updates are suspended so the selected city reliably reaches
-// the center-facing side of the globe.
+// Mobile-only search focus. Animate Euler yaw/pitch (with roll fixed to zero)
+// rather than a free quaternion, so finding a city cannot turn the globe upside down
+// or invert the horizontal swipe direction afterward.
 function focusCityOnGlobeMobile(city) {
   if (!city) return;
 
   if (cityFocusFrame) cancelAnimationFrame(cityFocusFrame);
 
-  const startQuaternion = globeGroup.quaternion.clone();
   const localDirection = cityToVector3(city, 1).normalize();
-  const worldDirection = localDirection.clone().applyQuaternion(startQuaternion).normalize();
-  // Match the point where the camera's center ray intersects the globe surface.
-  // The camera sits slightly above the equator, so this gives a more accurate
-  // screen-center alignment than aiming at the globe's exact +Z axis.
-  const viewCenterY = THREE.MathUtils.clamp(camera.position.y / GLOBE_RADIUS, -0.95, 0.95);
-  const cameraDirection = new THREE.Vector3(
-    0,
-    viewCenterY,
-    Math.sqrt(1 - viewCenterY * viewCenterY)
+  const latitudeAngle = Math.atan2(
+    localDirection.y,
+    Math.hypot(localDirection.x, localDirection.z)
   );
-  const alignment = new THREE.Quaternion().setFromUnitVectors(worldDirection, cameraDirection);
-  const targetQuaternion = alignment.multiply(startQuaternion.clone()).normalize();
+  // Match the camera's slightly-above-equator center line.
+  const viewCenterY = THREE.MathUtils.clamp(camera.position.y / GLOBE_RADIUS, -0.95, 0.95);
+  const centerAngle = Math.atan2(viewCenterY, Math.sqrt(1 - viewCenterY * viewCenterY));
+
+  // With rotation order XYZ and roll fixed to zero, this yaw puts the city's
+  // longitude on the front-facing meridian; pitch then brings it toward center.
+  const baseTargetYaw = Math.atan2(-localDirection.x, localDirection.z);
+  const startRotationX = THREE.MathUtils.clamp(globeGroup.rotation.x, MIN_PITCH, MAX_PITCH);
+  const startRotationY = globeGroup.rotation.y;
+  const startRotationZ = globeGroup.rotation.z;
+  const targetRotationX = THREE.MathUtils.clamp(
+    latitudeAngle - centerAngle,
+    MIN_PITCH,
+    MAX_PITCH
+  );
+  // Choose the equivalent yaw nearest the current orientation to avoid a long spin.
+  const targetRotationY = startRotationY + Math.atan2(
+    Math.sin(baseTargetYaw - startRotationY),
+    Math.cos(baseTargetYaw - startRotationY)
+  );
 
   const startZoom = camera.position.z;
   const targetZoom = 4.85;
   const startedAt = performance.now();
   const duration = 760;
 
+  // Start from a valid, unflipped pitch and smoothly remove any residual roll.
+  globeGroup.rotation.x = startRotationX;
   state.isFocusingCity = true;
   state.globeVelocityY = 0;
   state.globeVelocityX = 0;
@@ -2592,7 +2606,9 @@ function focusCityOnGlobeMobile(city) {
     const progress = THREE.MathUtils.clamp((now - startedAt) / duration, 0, 1);
     const eased = 1 - Math.pow(1 - progress, 3);
 
-    globeGroup.quaternion.slerpQuaternions(startQuaternion, targetQuaternion, eased);
+    globeGroup.rotation.x = startRotationX + (targetRotationX - startRotationX) * eased;
+    globeGroup.rotation.y = startRotationY + (targetRotationY - startRotationY) * eased;
+    globeGroup.rotation.z = startRotationZ * (1 - eased);
     camera.position.z = startZoom + (targetZoom - startZoom) * eased;
     state.labelsDirty = true;
     state.sceneDirty = true;
@@ -2600,7 +2616,9 @@ function focusCityOnGlobeMobile(city) {
     if (progress < 1) {
       cityFocusFrame = requestAnimationFrame(animateFocus);
     } else {
-      globeGroup.quaternion.copy(targetQuaternion);
+      globeGroup.rotation.x = targetRotationX;
+      globeGroup.rotation.y = targetRotationY;
+      globeGroup.rotation.z = 0;
       state.isFocusingCity = false;
       state.globeVelocityY = 0;
       state.globeVelocityX = 0;
@@ -2706,7 +2724,7 @@ function handlePointerMove(event) {
       const currentDistance = getActiveTouchDistance();
       if (currentDistance > 0 && pinchZoomStart.distance > 0) {
         const zoomedZ = pinchZoomStart.cameraZ * (pinchZoomStart.distance / currentDistance);
-        camera.position.z = THREE.MathUtils.clamp(zoomedZ, 3.25, 7.6);
+        camera.position.z = THREE.MathUtils.clamp(zoomedZ, 3.25, getMaxZoomOut());
         state.labelsDirty = true;
         state.sceneDirty = true;
         if (!cityCard.classList.contains("hidden")) hideCityCard();
@@ -2724,7 +2742,7 @@ function handlePointerMove(event) {
 
     if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
       state.dragMoved = true;
-      const touchSwipeBoost = isMobileUiActive() && event.pointerType === "touch" ? 1.403 : 1;
+      const touchSwipeBoost = isMobileUiActive() && event.pointerType === "touch" ? mobileTouchSwipeBoost : 1;
       state.globeVelocityY = dx * dragSensitivity * 6 * touchSwipeBoost;
       state.globeVelocityX = dy * dragPitchSensitivity * 6 * touchSwipeBoost;
 
@@ -2750,6 +2768,16 @@ function handlePointerMove(event) {
 
 function handleCanvasPointerDown(event) {
   if (state.activeModal) return;
+
+  // A deliberate new touch drag may interrupt the mobile search animation.
+  if (isMobileUiActive() && state.isFocusingCity) {
+    if (cityFocusFrame) cancelAnimationFrame(cityFocusFrame);
+    cityFocusFrame = 0;
+    state.isFocusingCity = false;
+    state.globeVelocityY = 0;
+    state.globeVelocityX = 0;
+    globeGroup.rotation.z = 0;
+  }
 
   if (event.pointerType === "touch") {
     activeTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -2875,13 +2903,13 @@ function updateEdgeRotation(delta) {
 
   globeGroup.rotation.y += state.globeVelocityY * delta;
   globeGroup.rotation.x += state.globeVelocityX * delta;
-  if (!mobileUi) {
-    globeGroup.rotation.x = THREE.MathUtils.clamp(
-      globeGroup.rotation.x,
-      MIN_PITCH,
-      MAX_PITCH
-    );
-  }
+  // Keep the globe inside its existing pitch range on desktop, and apply the
+  // same no-flip limit to mobile as well. Horizontal rotation remains unrestricted.
+  globeGroup.rotation.x = THREE.MathUtils.clamp(
+    globeGroup.rotation.x,
+    MIN_PITCH,
+    MAX_PITCH
+  );
 
   const moving = Math.abs(globeGroup.rotation.y - beforeY) > 0.00001 ||
     Math.abs(globeGroup.rotation.x - beforeX) > 0.00001;
@@ -2938,7 +2966,7 @@ canvas.addEventListener("wheel", (event) => {
   camera.position.z = THREE.MathUtils.clamp(
     camera.position.z + zoomDelta,
     3.25,
-    7.6
+    getMaxZoomOut()
   );
   if (camera.position.z !== previousZ) {
     state.labelsDirty = true;
